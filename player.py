@@ -383,9 +383,15 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 parts = range_spec.split("-", 1)
                 if parts[0]:
+                    # Normal range: bytes=START-[END]
                     start = int(parts[0])
-                if parts[1]:
-                    end = int(parts[1])
+                    if parts[1]:
+                        end = int(parts[1])
+                else:
+                    # Suffix range: bytes=-N  →  last N bytes
+                    suffix = int(parts[1])
+                    start = max(0, size - suffix)
+                    end = size - 1
             except (ValueError, IndexError):
                 # Malformed Range header — not satisfiable
                 self.send_response(416)
