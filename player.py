@@ -12,7 +12,11 @@ import threading
 import subprocess
 import urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 from pathlib import Path
+
+MAX_BODY = 64 * 1024  # 64 KB — more than enough for any JSON payload
+MAX_DOWNLOADS = 200   # prune old jobs beyond this
 
 MUSIC_DIR = Path(__file__).parent / "musics"
 MUSIC_DIR.mkdir(exist_ok=True)
@@ -43,6 +47,10 @@ def _increment_play(stem: str) -> int:
         counts[stem] = counts.get(stem, 0) + 1
         _save_counts(counts)
         return counts[stem]
+
+
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -146,10 +154,15 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/played":
             length = int(self.headers.get("Content-Length", 0))
+            if length > MAX_BODY:
+                self.send_response(413)
+                self.end_headers()
+                return
             body = json.loads(self.rfile.read(length))
             stem = body.get("name", "").strip()
-            if not stem:
-                self.send_response(400)
+            # Validate the name corresponds to an actual file on disk
+            if not stem or not (MUSIC_DIR / (stem + ".mp3")).exists():
+                self.send_response(404)
                 self.end_headers()
                 return
             new_count = _increment_play(stem)
@@ -161,6 +174,10 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         length = int(self.headers.get("Content-Length", 0))
+        if length > MAX_BODY:
+            self.send_response(413)
+            self.end_headers()
+            return
         body = json.loads(self.rfile.read(length))
         url = body.get("url", "")
         title = body.get("title", "track")
@@ -211,6 +228,14 @@ class Handler(BaseHTTPRequestHandler):
                 DOWNLOADS[job_id]["error"] = str(exc)
 
         threading.Thread(target=run, daemon=True).start()
+
+        # Prune stale completed/failed jobs to prevent unbounded memory growth
+        with _counts_lock:
+            done_ids = [k for k, v in DOWNLOADS.items() if v["status"] in ("done", "failed")]
+            if len(DOWNLOADS) > MAX_DOWNLOADS:
+                for k in done_ids[:len(DOWNLOADS) - MAX_DOWNLOADS]:
+                    del DOWNLOADS[k]
+
         self._serve_bytes(json.dumps({"id": job_id}).encode(), "application/json")
 
     def _serve_bytes(self, data, content_type):
@@ -260,7 +285,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8888
-    server = HTTPServer(("0.0.0.0", port), Handler)
+    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"Music Player running at http://localhost:{port}")
     print(f"Serving MP3s from: {MUSIC_DIR}")
     print("Press Ctrl+C to stop.")
