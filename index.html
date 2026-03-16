@@ -574,6 +574,15 @@ function fmt(s) {
   return m + ':' + String(sec).padStart(2, '0');
 }
 
+function esc(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 // Load track list
 fetch('/api/tracks').then(r => r.json()).then(data => {
   tracks = data;
@@ -594,10 +603,10 @@ function renderList() {
         <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
       </span>
       <div class="track-info">
-        <div class="track-name">${t.name}</div>
+        <div class="track-name">${esc(t.name)}</div>
       </div>
       ${playsLabel}
-      <span class="track-dur" data-src="${t.src}">—</span>
+      <span class="track-dur" data-src="${esc(t.src)}">—</span>
     `;
     li.addEventListener('click', () => {
       currentIndex = tracks.indexOf(t);
@@ -747,10 +756,10 @@ async function doYtSearch() {
       const div = document.createElement('div');
       div.className = 'yt-item';
       div.innerHTML = `
-        <img class="yt-thumb" src="${item.thumbnail}" alt="" loading="lazy">
+        <img class="yt-thumb" src="${esc(item.thumbnail)}" alt="" loading="lazy">
         <div class="yt-info">
-          <div class="yt-title">${item.title}</div>
-          <div class="yt-meta">${item.channel} · ${dur}</div>
+          <div class="yt-title">${esc(item.title)}</div>
+          <div class="yt-meta">${esc(item.channel)} · ${dur}</div>
           <div class="yt-progress-bar" style="display:none"><div class="yt-progress-fill" style="width:0%"></div></div>
         </div>
         <button class="yt-dl-btn">↓ Download</button>
