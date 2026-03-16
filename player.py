@@ -16,7 +16,13 @@ from socketserver import ThreadingMixIn
 from pathlib import Path
 
 MAX_BODY = 64 * 1024  # 64 KB — more than enough for any JSON payload
-MAX_DOWNLOADS = 200   # prune old jobs beyond this
+MAX_DOWNLOADS = 200  # prune old jobs beyond this
+MAX_CONCURRENT_DOWNLOADS = 5  # cap simultaneous yt-dlp download processes
+MAX_CONCURRENT_SEARCHES = 3  # cap simultaneous yt-dlp search processes
+MAX_SEARCH_QUERY_LEN = 200  # sane upper bound for a search query
+
+_download_semaphore = threading.Semaphore(MAX_CONCURRENT_DOWNLOADS)
+_search_semaphore = threading.Semaphore(MAX_CONCURRENT_SEARCHES)
 
 MUSIC_DIR = Path(__file__).parent / "musics"
 MUSIC_DIR.mkdir(exist_ok=True)
@@ -38,7 +44,9 @@ def _load_counts() -> dict:
 
 
 def _save_counts(counts: dict) -> None:
-    PLAY_COUNTS_FILE.write_text(json.dumps(counts, ensure_ascii=False, indent=2), encoding="utf-8")
+    PLAY_COUNTS_FILE.write_text(
+        json.dumps(counts, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 
 def _increment_play(stem: str) -> int:
@@ -87,6 +95,15 @@ class Handler(BaseHTTPRequestHandler):
             if not query:
                 self._serve_bytes(b"[]", "application/json")
                 return
+            if len(query) > MAX_SEARCH_QUERY_LEN:
+                self.send_response(400)
+                self.end_headers()
+                return
+            if not _search_semaphore.acquire(blocking=False):
+                self.send_response(429)  # Too Many Requests
+                self.send_header("Retry-After", "5")
+                self.end_headers()
+                return
             try:
                 result = subprocess.run(
                     [
@@ -125,6 +142,8 @@ class Handler(BaseHTTPRequestHandler):
                     json.dumps({"error": "yt-dlp not found"}).encode(),
                     "application/json",
                 )
+            finally:
+                _search_semaphore.release()
 
         elif path == "/api/download/status":
             job_id = qs.get("id", [""])[0]
@@ -153,55 +172,126 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.unquote(self.path.split("?")[0])
 
         if path == "/api/played":
-            length = int(self.headers.get("Content-Length", 0))
-            if length > MAX_BODY:
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+            except ValueError:
+                self.send_response(400)
+                self.end_headers()
+                return
+            if length < 0 or length > MAX_BODY:
                 self.send_response(413)
                 self.end_headers()
                 return
-            body = json.loads(self.rfile.read(length))
-            stem = body.get("name", "").strip()
-            # Validate the name corresponds to an actual file on disk
-            if not stem or not (MUSIC_DIR / (stem + ".mp3")).exists():
+            try:
+                body = json.loads(self.rfile.read(length))
+            except (json.JSONDecodeError, ValueError):
+                self.send_response(400)
+                self.end_headers()
+                return
+
+            # Accept integer index into the server-side track list — never a raw
+            # filename from the client, which would allow path traversal attacks.
+            try:
+                idx = int(body.get("index", ""))
+            except (TypeError, ValueError):
+                self.send_response(400)
+                self.end_headers()
+                return
+
+            # Rebuild track list with the same sort key used by /api/tracks so
+            # that the index the frontend holds matches what we resolve here.
+            # NOTE: capture index before any subsequent /api/tracks refresh on
+            # the frontend — the index must refer to the pre-refresh list.
+            counts = _load_counts()
+            mp3_files = sorted(
+                [f for f in MUSIC_DIR.iterdir() if f.suffix.lower() == ".mp3"],
+                key=lambda f: (-counts.get(f.stem, 0), f.name.lower()),
+            )
+            if idx < 0 or idx >= len(mp3_files):
                 self.send_response(404)
                 self.end_headers()
                 return
+
+            stem = mp3_files[idx].stem
             new_count = _increment_play(stem)
-            self._serve_bytes(json.dumps({"plays": new_count}).encode(), "application/json")
+            self._serve_bytes(
+                json.dumps({"plays": new_count}).encode(), "application/json"
+            )
             return
 
         if path != "/api/download":
             self._404()
             return
 
-        length = int(self.headers.get("Content-Length", 0))
-        if length > MAX_BODY:
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            self.send_response(400)
+            self.end_headers()
+            return
+        if length < 0 or length > MAX_BODY:
             self.send_response(413)
             self.end_headers()
             return
-        body = json.loads(self.rfile.read(length))
+        try:
+            body = json.loads(self.rfile.read(length))
+        except (json.JSONDecodeError, ValueError):
+            self.send_response(400)
+            self.end_headers()
+            return
         url = body.get("url", "")
-        title = body.get("title", "track")
+        title = str(body.get("title", "track") or "track")
+        # Sanitise: strip C0/C1 control characters and cap length to prevent
+        # unbounded memory growth from client-supplied strings.
+        title = "".join(c for c in title if c >= " " or c == "\t")[:300] or "track"
 
-        # Validate: only YouTube URLs allowed (prevent SSRF)
-        allowed = ("https://www.youtube.com/watch?v=", "https://youtu.be/")
-        if not any(url.startswith(p) for p in allowed):
+        # Validate: only YouTube URLs allowed (prevent SSRF).
+        # Use proper URL parsing instead of startswith() — a raw string prefix
+        # check is bypassed by the RFC 3986 userinfo trick:
+        #   https://www.youtube.com/watch?v=ID@evil.com/  → host is evil.com
+        try:
+            parsed = urllib.parse.urlparse(url)
+        except Exception:
+            parsed = None
+        if (
+            not parsed
+            or parsed.scheme != "https"
+            or parsed.hostname not in ("www.youtube.com", "youtu.be")
+            or parsed.username is not None  # reject any userinfo / @ component
+            or parsed.password is not None
+        ):
             self.send_response(400)
             self.end_headers()
             return
 
         job_id = str(uuid.uuid4())
-        DOWNLOADS[job_id] = {"status": "downloading", "progress": 0, "title": title, "error": ""}
+        DOWNLOADS[job_id] = {
+            "status": "downloading",
+            "progress": 0,
+            "title": title,
+            "error": "",
+        }
 
         def run():
+            if not _download_semaphore.acquire(blocking=False):
+                DOWNLOADS[job_id]["status"] = "failed"
+                DOWNLOADS[job_id]["error"] = (
+                    "Too many concurrent downloads; try again later."
+                )
+                return
             try:
                 proc = subprocess.Popen(
                     [
                         "yt-dlp",
-                        "--cookies-from-browser", "chrome",
-                        "-x", "--audio-format", "mp3",
+                        "--cookies-from-browser",
+                        "chrome",
+                        "-x",
+                        "--audio-format",
+                        "mp3",
                         "--no-playlist",
                         "--newline",
-                        "-o", str(MUSIC_DIR / "%(title)s.%(ext)s"),
+                        "-o",
+                        str(MUSIC_DIR / "%(title)s.%(ext)s"),
                         url,
                     ],
                     stdout=subprocess.PIPE,
@@ -226,6 +316,8 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 DOWNLOADS[job_id]["status"] = "failed"
                 DOWNLOADS[job_id]["error"] = str(exc)
+            finally:
+                _download_semaphore.release()
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -235,20 +327,37 @@ class Handler(BaseHTTPRequestHandler):
             if len(DOWNLOADS) > MAX_DOWNLOADS:
                 overflow = len(DOWNLOADS) - MAX_DOWNLOADS
                 # evict finished jobs first (safe to drop)
-                evict = [k for k, v in DOWNLOADS.items() if v["status"] in ("done", "failed")]
+                evict = [
+                    k for k, v in DOWNLOADS.items() if v["status"] in ("done", "failed")
+                ]
                 # if still not enough, evict oldest in-progress too
                 if len(evict) < overflow:
                     in_progress = [k for k in DOWNLOADS if k not in set(evict)]
-                    evict += in_progress[:overflow - len(evict)]
+                    evict += in_progress[: overflow - len(evict)]
                 for k in evict[:overflow]:
                     del DOWNLOADS[k]
 
         self._serve_bytes(json.dumps({"id": job_id}).encode(), "application/json")
 
+    def _security_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; "
+            "img-src 'self' https://i.ytimg.com data:; "
+            "media-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "connect-src 'self';",
+        )
+
     def _serve_bytes(self, data, content_type):
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", len(data))
+        self._security_headers()
         self.end_headers()
         self.wfile.write(data)
 
@@ -266,12 +375,21 @@ class Handler(BaseHTTPRequestHandler):
                     end = int(r[1])
             except Exception:
                 pass
+            # Clamp to valid byte positions and reject unsatisfiable ranges
+            start = max(0, start)
+            end = min(size - 1, end)
+            if start > end:
+                self.send_response(416)  # Range Not Satisfiable
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
             length = end - start + 1
             self.send_response(206)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
             self.send_header("Content-Length", length)
             self.send_header("Accept-Ranges", "bytes")
+            self._security_headers()
             self.end_headers()
             with open(path, "rb") as f:
                 f.seek(start)
@@ -281,6 +399,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", size)
             self.send_header("Accept-Ranges", "bytes")
+            self._security_headers()
             self.end_headers()
             with open(path, "rb") as f:
                 self.wfile.write(f.read())

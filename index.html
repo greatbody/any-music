@@ -671,7 +671,11 @@ audio.addEventListener('ended', async () => {
       const res = await fetch('/api/played', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: played.name })
+        // Send the server-side index, not the filename string — the backend
+        // resolves the real stem from the index, preventing path traversal.
+        // currentIndex is captured here, before the subsequent /api/tracks
+        // refresh changes the list order.
+        body: JSON.stringify({ index: currentIndex })
       });
       const { plays } = await res.json();
       played.plays = plays;
