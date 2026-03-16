@@ -33,6 +33,7 @@ PLAY_COUNTS_FILE = Path(__file__).parent / "play_counts.json"
 # job_id -> {"status": "downloading|done|failed", "progress": 0-100, "title": str, "error": str}
 DOWNLOADS: dict = {}
 _counts_lock = threading.Lock()
+_downloads_lock = threading.Lock()
 
 
 def _load_counts() -> dict:
@@ -148,12 +149,14 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path == "/api/download/status":
             job_id = qs.get("id", [""])[0]
-            job = DOWNLOADS.get(job_id)
-            if job is None:
+            with _downloads_lock:
+                job = DOWNLOADS.get(job_id)
+                snapshot = dict(job) if job is not None else None
+            if snapshot is None:
                 self.send_response(404)
                 self.end_headers()
                 return
-            self._serve_bytes(json.dumps(job).encode(), "application/json")
+            self._serve_bytes(json.dumps(snapshot).encode(), "application/json")
 
         elif path.startswith("/music/"):
             filename = urllib.parse.unquote(path[7:])
@@ -271,15 +274,18 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         job_id = str(uuid.uuid4())
-        DOWNLOADS[job_id] = {
-            "status": "downloading",
-            "progress": 0,
-            "title": title,
-            "error": "",
-        }
+        with _downloads_lock:
+            DOWNLOADS[job_id] = {
+                "status": "downloading",
+                "progress": 0,
+                "title": title,
+                "error": "",
+            }
 
         def run():
             if not _download_semaphore.acquire(blocking=False):
+                # Individual field updates in the worker thread rely on the GIL
+                # for atomicity; compound read-modify operations use _downloads_lock.
                 DOWNLOADS[job_id]["status"] = "failed"
                 DOWNLOADS[job_id]["error"] = (
                     "Too many concurrent downloads; try again later."
@@ -329,7 +335,7 @@ class Handler(BaseHTTPRequestHandler):
 
         # Prune jobs to stay within MAX_DOWNLOADS: prefer evicting done/failed first,
         # then oldest downloading jobs if still over the cap.
-        with _counts_lock:
+        with _downloads_lock:
             if len(DOWNLOADS) > MAX_DOWNLOADS:
                 overflow = len(DOWNLOADS) - MAX_DOWNLOADS
                 # evict finished jobs first (safe to drop)
