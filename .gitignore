@@ -15,3 +15,6 @@ venv/
 *.aac
 *.m4a
 *.ogg
+
+# Music folders
+musics/
