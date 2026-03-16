@@ -6,6 +6,7 @@ Usage: python3 player.py [port]
 """
 
 import sys
+import html
 import json
 import uuid
 import threading
@@ -244,9 +245,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         url = body.get("url", "")
         title = str(body.get("title", "track") or "track")
-        # Sanitise: strip C0/C1 control characters and cap length to prevent
-        # unbounded memory growth from client-supplied strings.
+        # Sanitise: strip C0/C1 control characters, cap length to prevent
+        # unbounded memory growth, then HTML-escape so the value is safe if
+        # it is ever rendered via innerHTML on the frontend.
         title = "".join(c for c in title if c >= " " or c == "\t")[:300] or "track"
+        title = html.escape(title, quote=True)
 
         # Validate: only YouTube URLs allowed (prevent SSRF).
         # Use proper URL parsing instead of startswith() — a raw string prefix
