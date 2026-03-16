@@ -17,9 +17,32 @@ from pathlib import Path
 MUSIC_DIR = Path(__file__).parent / "musics"
 MUSIC_DIR.mkdir(exist_ok=True)
 HTML_FILE = Path(__file__).parent / "index.html"
+PLAY_COUNTS_FILE = Path(__file__).parent / "play_counts.json"
 
 # job_id -> {"status": "downloading|done|failed", "progress": 0-100, "title": str, "error": str}
 DOWNLOADS: dict = {}
+_counts_lock = threading.Lock()
+
+
+def _load_counts() -> dict:
+    if PLAY_COUNTS_FILE.exists():
+        try:
+            return json.loads(PLAY_COUNTS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def _save_counts(counts: dict) -> None:
+    PLAY_COUNTS_FILE.write_text(json.dumps(counts, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _increment_play(stem: str) -> int:
+    with _counts_lock:
+        counts = _load_counts()
+        counts[stem] = counts.get(stem, 0) + 1
+        _save_counts(counts)
+        return counts[stem]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -35,12 +58,17 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_bytes(html.encode(), "text/html; charset=utf-8")
 
         elif path == "/api/tracks":
+            counts = _load_counts()
             mp3_files = sorted(
                 [f for f in MUSIC_DIR.iterdir() if f.suffix.lower() == ".mp3"],
-                key=lambda f: f.name.lower(),
+                key=lambda f: (-counts.get(f.stem, 0), f.name.lower()),
             )
             tracks = [
-                {"name": f.stem, "src": "/music/" + urllib.parse.quote(f.name)}
+                {
+                    "name": f.stem,
+                    "src": "/music/" + urllib.parse.quote(f.name),
+                    "plays": counts.get(f.stem, 0),
+                }
                 for f in mp3_files
             ]
             body = json.dumps(tracks).encode()
@@ -111,6 +139,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urllib.parse.unquote(self.path.split("?")[0])
+
+        if path == "/api/played":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length))
+            stem = body.get("name", "").strip()
+            if not stem:
+                self.send_response(400)
+                self.end_headers()
+                return
+            new_count = _increment_play(stem)
+            self._serve_bytes(json.dumps({"plays": new_count}).encode(), "application/json")
+            return
+
         if path != "/api/download":
             self._404()
             return

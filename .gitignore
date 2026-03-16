@@ -18,3 +18,6 @@ venv/
 
 # Music folders
 musics/
+
+# Music play count files
+play_counts.json

@@ -259,6 +259,13 @@
     color: var(--muted);
     flex-shrink: 0;
   }
+  .track-plays {
+    font-size: 0.68rem;
+    color: var(--muted);
+    flex-shrink: 0;
+    margin-right: 6px;
+    letter-spacing: 0.02em;
+  }
 
   /* scrollbar */
   #playlist-wrap::-webkit-scrollbar { width: 4px; }
@@ -580,6 +587,7 @@ function renderList() {
   filtered.forEach((t, i) => {
     const li = document.createElement('li');
     li.className = 'track-item' + (t === tracks[currentIndex] ? ' active' : '');
+    const playsLabel = t.plays ? `<span class="track-plays">${t.plays}▶</span>` : '';
     li.innerHTML = `
       <span class="track-num">${i + 1}</span>
       <span class="track-playing-icon">
@@ -588,6 +596,7 @@ function renderList() {
       <div class="track-info">
         <div class="track-name">${t.name}</div>
       </div>
+      ${playsLabel}
       <span class="track-dur" data-src="${t.src}">—</span>
     `;
     li.addEventListener('click', () => {
@@ -645,7 +654,30 @@ progress.addEventListener('input', () => {
 volumeSlider.addEventListener('input', () => { audio.volume = volumeSlider.value; });
 audio.volume = volumeSlider.value;
 
-audio.addEventListener('ended', () => {
+audio.addEventListener('ended', async () => {
+  // record a completed play (skip repeat — same song plays again)
+  if (!repeat && currentIndex >= 0) {
+    const played = tracks[currentIndex];
+    try {
+      const res = await fetch('/api/played', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: played.name })
+      });
+      const { plays } = await res.json();
+      played.plays = plays;
+      // refresh full list so sort order updates
+      const data = await fetch('/api/tracks').then(r => r.json());
+      const wasName = played.name;
+      tracks = data;
+      filtered = searchInput.value
+        ? tracks.filter(t => t.name.toLowerCase().includes(searchInput.value.toLowerCase()))
+        : [...tracks];
+      document.getElementById('track-count').textContent = tracks.length + ' tracks';
+      currentIndex = tracks.findIndex(t => t.name === wasName);
+      renderList();
+    } catch(e) {}
+  }
   if (repeat) { audio.play(); return; }
   if (shuffle) {
     let next;
@@ -747,12 +779,22 @@ async function doYtSearch() {
                                  s.progress + '%';
               if (s.status === 'done') {
                 clearInterval(poll);
-                // refresh track list
+                // fetch updated list from server
                 const data = await fetch('/api/tracks').then(x => x.json());
+                // find the newly downloaded track (present in data but not in tracks)
+                const existingNames = new Set(tracks.map(t => t.name));
+                const newTrack = data.find(t => !existingNames.has(t.name));
                 tracks = data;
-                filtered = searchInput.value
-                  ? tracks.filter(t => t.name.toLowerCase().includes(searchInput.value.toLowerCase()))
-                  : [...tracks];
+                if (newTrack) {
+                  // pin new track at position 0 regardless of current search
+                  const q = searchInput.value.toLowerCase();
+                  const rest = tracks.filter(t => t !== newTrack && (!q || t.name.toLowerCase().includes(q)));
+                  filtered = [newTrack, ...rest];
+                } else {
+                  filtered = searchInput.value
+                    ? tracks.filter(t => t.name.toLowerCase().includes(searchInput.value.toLowerCase()))
+                    : [...tracks];
+                }
                 document.getElementById('track-count').textContent = tracks.length + ' tracks';
                 renderList();
               } else if (s.status === 'failed') {
