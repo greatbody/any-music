@@ -14,8 +14,9 @@ import urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
-MUSIC_DIR = Path(__file__).parent
-HTML_FILE = MUSIC_DIR / "index.html"
+MUSIC_DIR = Path(__file__).parent / "musics"
+MUSIC_DIR.mkdir(exist_ok=True)
+HTML_FILE = Path(__file__).parent / "index.html"
 
 # job_id -> {"status": "downloading|done|failed", "progress": 0-100, "title": str, "error": str}
 DOWNLOADS: dict = {}
