@@ -229,11 +229,18 @@ class Handler(BaseHTTPRequestHandler):
 
         threading.Thread(target=run, daemon=True).start()
 
-        # Prune stale completed/failed jobs to prevent unbounded memory growth
+        # Prune jobs to stay within MAX_DOWNLOADS: prefer evicting done/failed first,
+        # then oldest downloading jobs if still over the cap.
         with _counts_lock:
-            done_ids = [k for k, v in DOWNLOADS.items() if v["status"] in ("done", "failed")]
             if len(DOWNLOADS) > MAX_DOWNLOADS:
-                for k in done_ids[:len(DOWNLOADS) - MAX_DOWNLOADS]:
+                overflow = len(DOWNLOADS) - MAX_DOWNLOADS
+                # evict finished jobs first (safe to drop)
+                evict = [k for k, v in DOWNLOADS.items() if v["status"] in ("done", "failed")]
+                # if still not enough, evict oldest in-progress too
+                if len(evict) < overflow:
+                    in_progress = [k for k in DOWNLOADS if k not in set(evict)]
+                    evict += in_progress[:overflow - len(evict)]
+                for k in evict[:overflow]:
                     del DOWNLOADS[k]
 
         self._serve_bytes(json.dumps({"id": job_id}).encode(), "application/json")
