@@ -71,8 +71,8 @@ class Handler(BaseHTTPRequestHandler):
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
 
         if path == "/" or path == "/index.html":
-            html = HTML_FILE.read_text(encoding="utf-8")
-            self._serve_bytes(html.encode(), "text/html; charset=utf-8")
+            page = HTML_FILE.read_text(encoding="utf-8")
+            self._serve_bytes(page.encode(), "text/html; charset=utf-8")
 
         elif path == "/api/tracks":
             counts = _load_counts()
