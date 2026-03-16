@@ -373,14 +373,25 @@ class Handler(BaseHTTPRequestHandler):
         range_header = self.headers.get("Range")
         if range_header:
             start, end = 0, size - 1
+            # Reject multi-range (we only support a single range)
+            range_spec = range_header.replace("bytes=", "").strip()
+            if "," in range_spec:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
             try:
-                r = range_header.replace("bytes=", "").split("-")
-                if r[0]:
-                    start = int(r[0])
-                if r[1]:
-                    end = int(r[1])
-            except Exception:
-                pass
+                parts = range_spec.split("-", 1)
+                if parts[0]:
+                    start = int(parts[0])
+                if parts[1]:
+                    end = int(parts[1])
+            except (ValueError, IndexError):
+                # Malformed Range header — not satisfiable
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
             # Clamp to valid byte positions and reject unsatisfiable ranges
             start = max(0, start)
             end = min(size - 1, end)
