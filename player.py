@@ -129,8 +129,12 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path.startswith("/music/"):
             filename = urllib.parse.unquote(path[7:])
-            filepath = MUSIC_DIR / filename
-            if filepath.exists() and filepath.suffix.lower() == ".mp3":
+            filepath = (MUSIC_DIR / filename).resolve()
+            if (
+                filepath.is_relative_to(MUSIC_DIR.resolve())
+                and filepath.exists()
+                and filepath.suffix.lower() == ".mp3"
+            ):
                 self._serve_file(filepath, "audio/mpeg")
             else:
                 self._404()
