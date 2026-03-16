@@ -191,9 +191,12 @@ class Handler(BaseHTTPRequestHandler):
 
             # Accept integer index into the server-side track list — never a raw
             # filename from the client, which would allow path traversal attacks.
-            try:
-                idx = int(body.get("index", ""))
-            except (TypeError, ValueError):
+            # Strict type check: reject floats, booleans, and strings even though
+            # Python's int() would silently coerce them (int(1.5)→1, int(True)→1,
+            # int("0")→0). JSON booleans map to Python bool which is a subclass of
+            # int, so we must explicitly exclude bool first.
+            idx = body.get("index")
+            if not isinstance(idx, int) or isinstance(idx, bool):
                 self.send_response(400)
                 self.end_headers()
                 return
