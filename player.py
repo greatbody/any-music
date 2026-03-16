@@ -355,6 +355,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
+        # NOTE: 'unsafe-inline' is required because index.html uses inline
+        # <script> and <style> blocks for the player UI.  This means CSP does
+        # not backstop against injected inline scripts; the html.escape()
+        # applied to user-supplied titles is therefore the primary XSS defence.
+        # Migrating to a nonce-based CSP would allow removing 'unsafe-inline'
+        # but requires bundling the frontend JS into a separate file.
         self.send_header(
             "Content-Security-Policy",
             "default-src 'self'; "
