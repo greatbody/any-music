@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Music files
+*.mp3
+*.flac
+*.wav
+*.aac
+*.m4a
+*.ogg
