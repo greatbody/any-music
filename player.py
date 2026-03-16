@@ -9,6 +9,7 @@ import sys
 import html
 import json
 import uuid
+import secrets
 import threading
 import subprocess
 import urllib.parse
@@ -28,6 +29,8 @@ _search_semaphore = threading.Semaphore(MAX_CONCURRENT_SEARCHES)
 MUSIC_DIR = Path(__file__).parent / "musics"
 MUSIC_DIR.mkdir(exist_ok=True)
 HTML_FILE = Path(__file__).parent / "index.html"
+CSS_FILE = Path(__file__).parent / "player.css"
+JS_FILE = Path(__file__).parent / "player.js"
 PLAY_COUNTS_FILE = Path(__file__).parent / "play_counts.json"
 
 # job_id -> {"status": "downloading|done|failed", "progress": 0-100, "title": str, "error": str}
@@ -67,13 +70,26 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass  # silence access logs
 
+    def version_string(self):
+        # Suppress Python version disclosure from the Server response header.
+        return "unknown"
+
     def do_GET(self):
         path = urllib.parse.unquote(self.path.split("?")[0])
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
 
         if path == "/" or path == "/index.html":
-            page = HTML_FILE.read_text(encoding="utf-8")
-            self._serve_bytes(page.encode(), "text/html; charset=utf-8")
+            nonce = secrets.token_urlsafe(16)
+            page = HTML_FILE.read_text(encoding="utf-8").replace("{{NONCE}}", nonce)
+            self._serve_bytes(page.encode(), "text/html; charset=utf-8", nonce=nonce)
+
+        elif path == "/player.css":
+            self._serve_bytes(CSS_FILE.read_bytes(), "text/css; charset=utf-8")
+
+        elif path == "/player.js":
+            self._serve_bytes(
+                JS_FILE.read_bytes(), "application/javascript; charset=utf-8"
+            )
 
         elif path == "/api/tracks":
             counts = _load_counts()
@@ -351,31 +367,39 @@ class Handler(BaseHTTPRequestHandler):
 
         self._serve_bytes(json.dumps({"id": job_id}).encode(), "application/json")
 
-    def _security_headers(self):
+    def _security_headers(self, nonce: str | None = None):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
-        # NOTE: 'unsafe-inline' is required because index.html uses inline
-        # <script> and <style> blocks for the player UI.  This means CSP does
-        # not backstop against injected inline scripts; the html.escape()
-        # applied to user-supplied titles is therefore the primary XSS defence.
-        # Migrating to a nonce-based CSP would allow removing 'unsafe-inline'
-        # but requires bundling the frontend JS into a separate file.
-        self.send_header(
-            "Content-Security-Policy",
-            "default-src 'self'; "
-            "img-src 'self' https://i.ytimg.com data:; "
-            "media-src 'self'; "
-            "script-src 'self' 'unsafe-inline'; "
-            "style-src 'self' 'unsafe-inline'; "
-            "connect-src 'self';",
-        )
+        # Nonce-based CSP: JS and CSS are served as external files, so no
+        # 'unsafe-inline' is needed.  The per-request nonce must match the
+        # nonce attribute on the <link> and <script> elements in index.html.
+        if nonce:
+            nonce_src = f"'nonce-{nonce}'"
+            csp = (
+                f"default-src 'self'; "
+                f"img-src 'self' https://i.ytimg.com data:; "
+                f"media-src 'self'; "
+                f"script-src 'self' {nonce_src}; "
+                f"style-src 'self' {nonce_src}; "
+                f"connect-src 'self';"
+            )
+        else:
+            csp = (
+                "default-src 'self'; "
+                "img-src 'self' https://i.ytimg.com data:; "
+                "media-src 'self'; "
+                "script-src 'self'; "
+                "style-src 'self'; "
+                "connect-src 'self';"
+            )
+        self.send_header("Content-Security-Policy", csp)
 
-    def _serve_bytes(self, data, content_type):
+    def _serve_bytes(self, data: bytes, content_type: str, nonce: str | None = None):
         self.send_response(200)
         self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", len(data))
-        self._security_headers()
+        self.send_header("Content-Length", str(len(data)))
+        self._security_headers(nonce=nonce)
         self.end_headers()
         self.wfile.write(data)
 
@@ -422,7 +446,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(206)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-            self.send_header("Content-Length", length)
+            self.send_header("Content-Length", str(length))
             self.send_header("Accept-Ranges", "bytes")
             self._security_headers()
             self.end_headers()
@@ -432,7 +456,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_response(200)
             self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", size)
+            self.send_header("Content-Length", str(size))
             self.send_header("Accept-Ranges", "bytes")
             self._security_headers()
             self.end_headers()
