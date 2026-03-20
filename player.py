@@ -91,6 +91,15 @@ class Handler(BaseHTTPRequestHandler):
                 JS_FILE.read_bytes(), "application/javascript; charset=utf-8"
             )
 
+        elif path == "/favicon.svg":
+            svg = (
+                '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+                '<rect width="64" height="64" rx="14" fill="#1a1a2e"/>'
+                '<text x="32" y="46" font-size="36" text-anchor="middle" fill="#c084fc">♪</text>'
+                "</svg>"
+            )
+            self._serve_bytes(svg.encode(), "image/svg+xml")
+
         elif path == "/api/tracks":
             counts = _load_counts()
             mp3_files = sorted(
