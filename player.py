@@ -94,8 +94,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/favicon.svg":
             svg = (
                 '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
-                '<rect width="64" height="64" rx="14" fill="#1a1a2e"/>'
-                '<text x="32" y="46" font-size="36" text-anchor="middle" fill="#c084fc">♪</text>'
+                '<rect width="64" height="64" rx="14" fill="#7c6af7"/>'
+                '<text x="32" y="47" font-size="38" text-anchor="middle" fill="#ffffff">♪</text>'
                 "</svg>"
             )
             self._serve_bytes(svg.encode(), "image/svg+xml")
