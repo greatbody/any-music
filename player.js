@@ -101,6 +101,9 @@ playBtn.addEventListener('click', () => {
   else { audio.pause(); setPlaying(false); }
 });
 
+audio.addEventListener('play', () => setPlaying(true));
+audio.addEventListener('pause', () => setPlaying(false));
+
 audio.addEventListener('timeupdate', () => {
   if (!audio.duration) return;
   progress.value = (audio.currentTime / audio.duration) * 100;
