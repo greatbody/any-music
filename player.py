@@ -5,6 +5,7 @@ Serves MP3 files in the current directory with a modern web player UI.
 Usage: python3 player.py [port]
 """
 
+import re
 import sys
 import html
 import json
@@ -13,6 +14,7 @@ import secrets
 import threading
 import subprocess
 import urllib.parse
+import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from pathlib import Path
@@ -32,6 +34,24 @@ HTML_FILE = Path(__file__).parent / "index.html"
 CSS_FILE = Path(__file__).parent / "player.css"
 JS_FILE = Path(__file__).parent / "player.js"
 PLAY_COUNTS_FILE = Path(__file__).parent / "play_counts.json"
+COOKIES_FILE = Path(__file__).parent / "cookies.txt"
+
+
+def _ytdlp_platform_args() -> list[str]:
+    """Return yt-dlp platform-specific arguments.
+
+    macOS: use --cookies-from-browser chrome (reads live Chrome cookies).
+    Linux/other: use --cookies <file> + --js-runtimes node + mweb client
+    (required for PO Token authentication on headless servers).
+    """
+    if sys.platform == "darwin":
+        return ["--cookies-from-browser", "chrome"]
+    args: list[str] = []
+    if COOKIES_FILE.exists():
+        args += ["--cookies", str(COOKIES_FILE)]
+    args += ["--js-runtimes", "node", "--extractor-args", "youtube:player_client=mweb"]
+    return args
+
 
 # job_id -> {"status": "downloading|done|failed", "progress": 0-100, "title": str, "error": str}
 DOWNLOADS: dict = {}
@@ -156,7 +176,7 @@ class Handler(BaseHTTPRequestHandler):
                                 "url": f"https://www.youtube.com/watch?v={vid_id}",
                                 "duration": d.get("duration"),
                                 "channel": d.get("channel") or d.get("uploader", ""),
-                                "thumbnail": f"https://i.ytimg.com/vi/{vid_id}/mqdefault.jpg",
+                                "thumbnail": f"/api/img-proxy?v={vid_id}",
                             }
                         )
                     except Exception:
@@ -171,6 +191,30 @@ class Handler(BaseHTTPRequestHandler):
                 )
             finally:
                 _search_semaphore.release()
+
+        elif path == "/api/img-proxy":
+            # Proxy YouTube thumbnail images to bypass network restrictions.
+            # Only allows fetching images from i.ytimg.com to prevent SSRF.
+            vid_id = qs.get("v", [""])[0]
+            if not vid_id or not re.fullmatch(r"[A-Za-z0-9_-]{11}", vid_id):
+                self.send_response(400)
+                self.end_headers()
+                return
+            img_url = f"https://i.ytimg.com/vi/{vid_id}/mqdefault.jpg"
+            try:
+                result = subprocess.run(
+                    ["curl", "-s", "-o", "-", "-w", "", img_url],
+                    capture_output=True,
+                    timeout=10,
+                )
+                if result.returncode == 0 and result.stdout:
+                    self._serve_bytes(result.stdout, "image/jpeg")
+                else:
+                    self.send_response(502)
+                    self.end_headers()
+            except Exception:
+                self.send_response(502)
+                self.end_headers()
 
         elif path == "/api/download/status":
             job_id = qs.get("id", [""])[0]
@@ -320,8 +364,7 @@ class Handler(BaseHTTPRequestHandler):
                 proc = subprocess.Popen(
                     [
                         "yt-dlp",
-                        "--cookies-from-browser",
-                        "chrome",
+                        *_ytdlp_platform_args(),
                         "-x",
                         "--audio-format",
                         "mp3",
@@ -335,8 +378,12 @@ class Handler(BaseHTTPRequestHandler):
                     stderr=subprocess.STDOUT,
                     text=True,
                 )
+                last_lines: list[str] = []
                 for line in proc.stdout:
                     line = line.strip()
+                    if not line:
+                        continue
+                    last_lines = (last_lines + [line])[-10:]
                     if "[download]" in line and "%" in line:
                         try:
                             pct = float(line.split("%")[0].split()[-1])
@@ -348,8 +395,12 @@ class Handler(BaseHTTPRequestHandler):
                     DOWNLOADS[job_id]["status"] = "done"
                     DOWNLOADS[job_id]["progress"] = 100
                 else:
+                    err_detail = next(
+                        (l for l in reversed(last_lines) if "ERROR:" in l),
+                        last_lines[-1] if last_lines else "yt-dlp exited with error",
+                    )
                     DOWNLOADS[job_id]["status"] = "failed"
-                    DOWNLOADS[job_id]["error"] = "yt-dlp exited with error"
+                    DOWNLOADS[job_id]["error"] = err_detail
             except Exception as exc:
                 DOWNLOADS[job_id]["status"] = "failed"
                 DOWNLOADS[job_id]["error"] = str(exc)
@@ -387,7 +438,7 @@ class Handler(BaseHTTPRequestHandler):
             nonce_src = f"'nonce-{nonce}'"
             csp = (
                 f"default-src 'self'; "
-                f"img-src 'self' https://i.ytimg.com data:; "
+                f"img-src 'self' data:; "
                 f"media-src 'self'; "
                 f"script-src 'self' {nonce_src}; "
                 f"style-src 'self' {nonce_src}; "
@@ -396,7 +447,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             csp = (
                 "default-src 'self'; "
-                "img-src 'self' https://i.ytimg.com data:; "
+                "img-src 'self' data:; "
                 "media-src 'self'; "
                 "script-src 'self'; "
                 "style-src 'self'; "
@@ -477,9 +528,32 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
 
+def _register_service(port: int):
+    """Fire-and-forget service registration. All errors are silently ignored."""
+    try:
+        payload = json.dumps(
+            {
+                "name": "any-music",
+                "url": f"http://localhost:{port}",
+                "description": "Local music player and YouTube downloader",
+            }
+        ).encode()
+        req = urllib.request.Request(
+            "http://localhost:1234/services",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5):
+            pass
+    except Exception:
+        pass  # registration is best-effort; never disturb startup
+
+
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8888
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    threading.Thread(target=_register_service, args=(port,), daemon=True).start()
     print(f"Music Player running at http://localhost:{port}")
     print(f"Serving MP3s from: {MUSIC_DIR}")
     print("Press Ctrl+C to stop.")
